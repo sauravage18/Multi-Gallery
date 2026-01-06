@@ -26,6 +26,7 @@ button,.file-label{appearance:none;border:1px solid #2b2f66;background:linear-gr
 button:hover,.file-label:hover{transform:translateY(-1px);border-color:#3940a5} button:disabled{opacity:.5;cursor:not-allowed}
 .file-label{display:inline-flex;align-items:center;gap:6px} input[type=file]{display:none}
 .stats{margin-left:auto;color:var(--muted);display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px}
+.stats.hidden{display:none}
 main{max-width:1100px;margin:12px auto 80px;padding:0 12px}
 .dropzone{border:2px dashed #2c326e;border-radius:16px;padding:20px;text-align:center;color:var(--muted);background:rgba(124,140,255,.06);font-size:14px}
 .dropzone.dragover{border-color:var(--accent);background:rgba(124,140,255,.12);color:var(--text)}
@@ -61,6 +62,7 @@ dialog{border:none;border-radius:16px;padding:0;max-width:95vw;background:#0e133
 .dashboard-header{text-align:center;margin-bottom:20px;padding:16px 0;}
 .dashboard-title{font-size:24px;font-weight:bold;margin:0;color:var(--accent);}
 .dashboard-subtitle{color:var(--muted);margin-top:4px;font-size:14px}
+.dashboard-meta{color:var(--muted);margin-top:8px;font-size:13px}
 .dashboard-actions{display:flex;gap:10px;justify-content:center;margin-top:14px;flex-wrap:wrap}
 
 /* Fixed Back Button (Mobile-Friendly) */
@@ -160,6 +162,7 @@ dialog::backdrop { background: rgba(0,0,0,0.6); }
   <div class="dashboard-header">
     <h2 class="dashboard-title">Your Albums</h2>
     <p class="dashboard-subtitle">Manage, backup, and restore your galleries</p>
+    <div class="dashboard-meta" id="dashboardMeta">Loading...</div>
     <div class="dashboard-actions">
       <button id="backupAllBtn" style="background:#00c9a7;color:#0a0d20">💾 Backup All</button>
       <label class="file-label" title="Restore all albums from .json">
@@ -264,57 +267,72 @@ let salt = null;
 // ------------------ IndexedDB helpers ---------------------
 let db;
 function openDB(){
-return new Promise((resolve,reject)=>{
-const req = indexedDB.open(DB_NAME, DB_VERSION);
-req.onupgradeneeded = (event) => {
-const d = event.target.result;
-const oldVersion = event.oldVersion;
-if(!d.objectStoreNames.contains(STORE)){
-const os = d.createObjectStore(STORE,{keyPath:'id'});
-os.createIndex('by_name','name',{unique:false});
-os.createIndex('by_album','albumId',{unique:false});
-} else {
-const os = d.transaction.objectStore(STORE);
-if (!os.indexNames.contains('by_album')) {
-os.createIndex('by_album','albumId',{unique:false});
-}
-}
-if(!d.objectStoreNames.contains(ALBUM_STORE)){
-const albumOS = d.createObjectStore(ALBUM_STORE,{keyPath:'id'});
-albumOS.createIndex('by_name','name',{unique:false});
-}
-if(!d.objectStoreNames.contains(META)){
-d.createObjectStore(META, { keyPath: 'k' });
-}
-};
-req.onsuccess = async () => {
-db = req.result;
-if (req.transaction && req.transaction.db.version === 2) {
-try {
-const tx = db.transaction([STORE], 'readwrite');
-const store = tx.objectStore(STORE);
-const getAllReq = store.getAll();
-getAllReq.onsuccess = async () => {
-const images = getAllReq.result || [];
-const updates = [];
-for (const img of images) {
-if (img.albumId === undefined) {
-img.albumId = 'default';
-updates.push(store.put(img));
-}
-}
-if (updates.length > 0) {
-await Promise.all(updates);
-}
-};
-} catch (e) {
-console.warn('Migration error (non-fatal):', e);
-}
-}
-resolve(db);
-};
-req.onerror = () => reject(req.error);
-});
+  return new Promise((resolve,reject)=>{
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (event) => {
+      const d = event.target.result;
+      const oldVersion = event.oldVersion;
+
+      // ✅ CREATE STORES SYNCHRONOUSLY — NO AWAIT HERE
+      if(!d.objectStoreNames.contains(STORE)){
+        const os = d.createObjectStore(STORE,{keyPath:'id'});
+        os.createIndex('by_name','name',{unique:false});
+        os.createIndex('by_album','albumId',{unique:false});
+      }
+
+      if(!d.objectStoreNames.contains(ALBUM_STORE)){
+        const albumOS = d.createObjectStore(ALBUM_STORE,{keyPath:'id'});
+        albumOS.createIndex('by_name','name',{unique:false});
+      }
+
+      if(!d.objectStoreNames.contains(META)){
+        d.createObjectStore(META, { keyPath: 'k' });
+      }
+    };
+
+    req.onsuccess = async () => {
+      db = req.result;
+
+      // ✅ Run async migration AFTER DB opens
+      try {
+        const migrated = await metaGet('migrated_v2');
+        if (!migrated) {
+          console.log('Running post-upgrade migration...');
+          const tx = db.transaction([STORE], 'readwrite');
+          const store = tx.objectStore(STORE);
+          const getAllReq = store.getAll();
+          getAllReq.onsuccess = async () => {
+            const images = getAllReq.result || [];
+            const updates = [];
+            for (const img of images) {
+              if (img.albumId === undefined) {
+                img.albumId = 'default';
+                updates.push(store.put(img));
+              }
+            }
+            try {
+              await Promise.all(updates);
+              await metaPut('migrated_v2', true);
+              console.log('Migration completed.');
+            } catch (e) {
+              console.warn('Migration write failed:', e);
+            }
+            resolve(db);
+          };
+          getAllReq.onerror = () => {
+            console.warn('Migration read failed');
+            resolve(db);
+          };
+          return; // wait for async migration
+        }
+      } catch (e) {
+        console.warn('Migration check failed', e);
+      }
+
+      resolve(db);
+    };
+    req.onerror = () => reject(req.error);
+  });
 }
 
 function txObjectStore(mode='readonly'){ return db.transaction([STORE], mode).objectStore(STORE); }
@@ -326,33 +344,33 @@ function putAlbumRecord(record){ return new Promise((res,rej)=>{ const r = txAlb
 function deleteImageRecord(id){ return new Promise((res,rej)=>{ const r = txObjectStore('readwrite').delete(id); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error) }); }
 function deleteAlbumRecord(id){ return new Promise((res,rej)=>{ const r = txAlbumStore('readwrite').delete(id); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error) }); }
 function getImageRecordsByAlbum(albumId){
-return new Promise((res,rej)=>{
-const store = txObjectStore('readonly');
-if (store.indexNames.contains('by_album')) {
-const idx = store.index('by_album');
-const req = idx.getAll(IDBKeyRange.only(albumId));
-req.onsuccess = () => res(req.result || []);
-req.onerror = () => rej(req.error);
-} else {
-const req = store.getAll();
-req.onsuccess = () => {
-const all = req.result || [];
-const filtered = all.filter(img => img.albumId === albumId);
-res(filtered);
-};
-req.onerror = () => rej(req.error);
-}
-});
+  return new Promise((res,rej)=>{
+    const store = txObjectStore('readonly');
+    if (store.indexNames.contains('by_album')) {
+      const idx = store.index('by_album');
+      const req = idx.getAll(IDBKeyRange.only(albumId));
+      req.onsuccess = () => res(req.result || []);
+      req.onerror = () => rej(req.error);
+    } else {
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const all = req.result || [];
+        const filtered = all.filter(img => img.albumId === albumId);
+        res(filtered);
+      };
+      req.onerror = () => rej(req.error);
+    }
+  });
 }
 function getAllRecords(){ return new Promise((res,rej)=>{ const r = txObjectStore('readonly').getAll(); r.onsuccess=()=>res(r.result||[]); r.onerror=()=>rej(r.error) }); }
 function getAllAlbums(){ return new Promise((res,rej)=>{ const r = txAlbumStore('readonly').getAll(); r.onsuccess=()=>res(r.result||[]); r.onerror=()=>rej(r.error) }); }
 function getManyRecords(ids){
-const store = txObjectStore('readonly');
-return Promise.all(ids.map(id=>new Promise((res,rej)=>{
-const r = store.get(id);
-r.onsuccess=()=>res(r.result);
-r.onerror=()=>rej(r.error)
-})));
+  const store = txObjectStore('readonly');
+  return Promise.all(ids.map(id=>new Promise((res,rej)=>{
+    const r = store.get(id);
+    r.onsuccess=()=>res(r.result);
+    r.onerror=()=>rej(r.error)
+  })));
 }
 function metaGet(key){ return new Promise((res,rej)=>{ const r = txMetaStore('readonly').get(key); r.onsuccess=()=>res(r.result? r.result.v : undefined); r.onerror=()=>rej(r.error) }); }
 function metaPut(key,value){ return new Promise((res,rej)=>{ const r = txMetaStore('readwrite').put({k:key,v:value}); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error) }); }
@@ -364,51 +382,51 @@ const uid = () => crypto.randomUUID ? crypto.randomUUID() : (Date.now()+Math.ran
 async function blobToArrayBuffer(blob){ return await blob.arrayBuffer(); }
 function arrayBufferToBlob(ab, type){ return new Blob([ab], { type: type || 'application/octet-stream' }); }
 function u8aToBase64(u8a){
-let binary = '';
-const len = u8a.byteLength;
-for(let i=0;i<len;i++) binary += String.fromCharCode(u8a[i]);
-return btoa(binary);
+  let binary = '';
+  const len = u8a.byteLength;
+  for(let i=0;i<len;i++) binary += String.fromCharCode(u8a[i]);
+  return btoa(binary);
 }
 function base64ToU8a(b64){
-const bin = atob(b64);
-const u8 = new Uint8Array(bin.length);
-for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
-return u8;
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
+  return u8;
 }
 
 // ------------------ Crypto core ---------------------------
 async function deriveKeyFromPassword(password, saltBytes){
-const enc = new TextEncoder();
-const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveKey']);
-const derived = await crypto.subtle.deriveKey(
-{ name: 'PBKDF2', salt: saltBytes, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
-keyMaterial,
-ENC_ALGO,
-false,
-['encrypt','decrypt']
-);
-return derived;
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveKey']);
+  const derived = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: saltBytes, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+    keyMaterial,
+    ENC_ALGO,
+    false,
+    ['encrypt','decrypt']
+  );
+  return derived;
 }
 async function ensureSaltAndKey(password){
-const metaSalt = await metaGet(SALT_KEY);
-if(metaSalt){
-salt = Uint8Array.from(metaSalt);
-}else{
-const s = crypto.getRandomValues(new Uint8Array(16));
-salt = s;
-await metaPut(SALT_KEY, Array.from(s));
-}
-cryptoKey = await deriveKeyFromPassword(password, salt);
+  const metaSalt = await metaGet(SALT_KEY);
+  if(metaSalt){
+    salt = Uint8Array.from(metaSalt);
+  }else{
+    const s = crypto.getRandomValues(new Uint8Array(16));
+    salt = s;
+    await metaPut(SALT_KEY, Array.from(s));
+  }
+  cryptoKey = await deriveKeyFromPassword(password, salt);
 }
 async function encryptArrayBuffer(ab){
-const iv = crypto.getRandomValues(new Uint8Array(12));
-const cipher = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, cryptoKey, ab);
-return { iv: Array.from(iv), cipher: cipher };
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const cipher = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, cryptoKey, ab);
+  return { iv: Array.from(iv), cipher: cipher };
 }
 async function decryptToArrayBuffer(ivArr, cipherAB){
-const iv = new Uint8Array(ivArr);
-const plain = await crypto.subtle.decrypt({ name:'AES-GCM', iv }, cryptoKey, cipherAB);
-return plain;
+  const iv = new Uint8Array(ivArr);
+  const plain = await crypto.subtle.decrypt({ name:'AES-GCM', iv }, cryptoKey, cipherAB);
+  return plain;
 }
 
 // ------------------ DOM elements & state -------------------
@@ -455,579 +473,598 @@ let albumImages = [];
 
 // ------------------ Album Management -------------------
 async function ensureDefaultAlbum() {
-try {
-const albumStore = txAlbumStore('readonly');
-const req = albumStore.get('default');
-return new Promise((resolve) => {
-req.onsuccess = () => {
-if (!req.result) {
-const defaultAlbumRecord = {
-id: 'default',
-name: 'Default',
-createdAt: Date.now(),
-imageCount: 0
-};
-putAlbumRecord(defaultAlbumRecord).then(() => resolve(true)).catch(() => resolve(false));
-} else {
-resolve(true);
-}
-};
-req.onerror = () => {
-const defaultAlbumRecord = {
-id: 'default',
-name: 'Default',
-createdAt: Date.now(),
-imageCount: 0
-};
-putAlbumRecord(defaultAlbumRecord).then(() => resolve(true)).catch(() => resolve(false));
-};
-});
-} catch (e) {
-console.warn('Error ensuring default album:', e);
-return false;
-}
+  try {
+    const tx = db.transaction([ALBUM_STORE], 'readonly');
+    const req = tx.objectStore(ALBUM_STORE).get('default');
+    return new Promise((resolve) => {
+      req.onsuccess = () => {
+        if (!req.result) {
+          const defaultAlbumRecord = {
+            id: 'default',
+            name: 'Default',
+            createdAt: Date.now(),
+            imageCount: 0
+          };
+          putAlbumRecord(defaultAlbumRecord).then(() => resolve(true)).catch(() => resolve(false));
+        } else {
+          resolve(true);
+        }
+      };
+      req.onerror = () => {
+        const defaultAlbumRecord = {
+          id: 'default',
+          name: 'Default',
+          createdAt: Date.now(),
+          imageCount: 0
+        };
+        putAlbumRecord(defaultAlbumRecord).then(() => resolve(true)).catch(() => resolve(false));
+      };
+    });
+  } catch (e) {
+    console.warn('Error ensuring default album:', e);
+    return false;
+  }
 }
 
 async function createAlbum(name) {
-if (!name || name.trim() === '') {
-alert('Please enter a valid album name');
-return;
-}
-const albumId = uid();
-const albumRecord = {
-id: albumId,
-name: name.trim(),
-createdAt: Date.now(),
-imageCount: 0
-};
-await putAlbumRecord(albumRecord);
-albums.push(albumRecord);
-await refreshDashboard();
-albumDialog.close();
-albumNameInput.value = '';
+  if (!name || name.trim() === '') {
+    alert('Please enter a valid album name');
+    return;
+  }
+  const albumId = uid();
+  const albumRecord = {
+    id: albumId,
+    name: name.trim(),
+    createdAt: Date.now(),
+    imageCount: 0
+  };
+  await putAlbumRecord(albumRecord);
+  albums.push(albumRecord);
+  await refreshDashboard();
+  albumDialog.close();
+  albumNameInput.value = '';
 }
 
 async function deleteAlbum(albumId) {
-if (albumId === 'default') {
-alert('Cannot delete the default album');
-return;
-}
-const imagesToDelete = await getImageRecordsByAlbum(albumId);
-for (const img of imagesToDelete) {
-await deleteImageRecord(img.id);
-}
-await deleteAlbumRecord(albumId);
-albums = albums.filter(a => a.id !== albumId);
-if (currentAlbumId === albumId) {
-switchToDashboard();
-} else {
-await refreshDashboard();
-}
+  if (albumId === 'default') {
+    alert('Cannot delete the default album');
+    return;
+  }
+  const imagesToDelete = await getImageRecordsByAlbum(albumId);
+  for (const img of imagesToDelete) {
+    await deleteImageRecord(img.id);
+  }
+  await deleteAlbumRecord(albumId);
+  albums = albums.filter(a => a.id !== albumId);
+  if (currentAlbumId === albumId) {
+    switchToDashboard();
+  } else {
+    await refreshDashboard();
+  }
 }
 
 function openAlbumActions(album) {
-currentActionAlbum = album;
-albumActionsTitle.textContent = `Album: ${album.name}`;
-albumActionsDialog.showModal();
+  currentActionAlbum = album;
+  albumActionsTitle.textContent = `Album: ${album.name}`;
+  albumActionsDialog.showModal();
 }
 
 async function refreshDashboard() {
-try {
-albums = await getAllAlbums();
-} catch (e) {
-albums = [];
-}
-if (!albums.some(a => a.id === 'default')) {
-const defaultAlbum = { id: 'default', name: 'Default', createdAt: Date.now(), imageCount: 0 };
-albums.unshift(defaultAlbum);
-try { await putAlbumRecord(defaultAlbum); } catch {}
-}
-albumGrid.innerHTML = '';
-if (albums.length === 0) {
-noAlbums.classList.remove('hidden');
-return;
-}
-noAlbums.classList.add('hidden');
-albums.sort((a, b) => {
-if (a.id === 'default') return -1;
-if (b.id === 'default') return 1;
-return b.createdAt - a.createdAt;
-});
-for (const album of albums) {
-let images = [];
-try { images = await getImageRecordsByAlbum(album.id); } catch {}
-album.imageCount = images.length;
-if (album.id !== 'default') {
-try { await putAlbumRecord(album); } catch {}
-}
-const albumCard = document.createElement('div');
-albumCard.className = 'album-card';
-albumCard.dataset.albumId = album.id;
-let thumbHTML = '';
-for (let i = 0; i < Math.min(4, images.length); i++) {
-thumbHTML += `<div class="album-thumb" style="background:#333;"></div>`;
-}
-albumCard.innerHTML = `
-<div class="album-header">
-<div class="album-name">${album.name}</div>
-<div style="display:flex;gap:6px">
-<button class="album-action" data-action="manage" title="Manage Album">⚙️</button>
-</div>
-</div>
-<div class="album-thumb-grid">${thumbHTML}</div>
-<div class="album-meta">${images.length} image${images.length !== 1 ? 's' : ''}</div>
-`;
-albumCard.querySelector('[data-action="manage"]').addEventListener('click', (e) => {
-e.stopPropagation();
-openAlbumActions(album);
-});
-albumCard.addEventListener('click', () => {
-switchToAlbum(album.id);
-});
-albumGrid.appendChild(albumCard);
-}
+  try {
+    albums = await getAllAlbums();
+  } catch (e) {
+    albums = [];
+  }
+
+  // Ensure Default exists
+  if (!albums.some(a => a.id === 'default')) {
+    const defaultAlbum = { id: 'default', name: 'Default', createdAt: Date.now(), imageCount: 0 };
+    albums.unshift(defaultAlbum);
+    try { await putAlbumRecord(defaultAlbum); } catch {}
+  }
+
+  // ✅ Show album count in dashboard header
+  const userAlbums = albums.filter(a => a.id !== 'default');
+  const totalAlbums = userAlbums.length + 1; // include Default
+  const albumWord = totalAlbums === 1 ? 'album' : 'albums';
+  $('#dashboardMeta').textContent = `${totalAlbums} ${albumWord}`;
+
+  // Render album grid
+  albumGrid.innerHTML = '';
+  if (albums.length === 1 && albums[0].id === 'default' && !userAlbums.length) {
+    noAlbums.classList.remove('hidden');
+  } else {
+    noAlbums.classList.add('hidden');
+  }
+
+  // Sort: Default first, then newest
+  albums.sort((a, b) => {
+    if (a.id === 'default') return -1;
+    if (b.id === 'default') return 1;
+    return b.createdAt - a.createdAt;
+  });
+
+  for (const album of albums) {
+    let images = [];
+    try { images = await getImageRecordsByAlbum(album.id); } catch {}
+    album.imageCount = images.length;
+    if (album.id !== 'default') {
+      try { await putAlbumRecord(album); } catch {}
+    }
+
+    const albumCard = document.createElement('div');
+    albumCard.className = 'album-card';
+    albumCard.dataset.albumId = album.id;
+
+    let thumbHTML = '';
+    for (let i = 0; i < Math.min(4, images.length); i++) {
+      thumbHTML += `<div class="album-thumb" style="background:#333;"></div>`;
+    }
+
+    albumCard.innerHTML = `
+      <div class="album-header">
+        <div class="album-name">${album.name}</div>
+        <div style="display:flex;gap:6px">
+          <button class="album-action" data-action="manage" title="Manage Album">⚙️</button>
+        </div>
+      </div>
+      <div class="album-thumb-grid">${thumbHTML}</div>
+      <div class="album-meta">${images.length} image${images.length !== 1 ? 's' : ''}</div>
+    `;
+
+    albumCard.querySelector('[data-action="manage"]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openAlbumActions(album);
+    });
+    albumCard.addEventListener('click', () => {
+      switchToAlbum(album.id);
+    });
+    albumGrid.appendChild(albumCard);
+  }
 }
 
 // ------------------ Gallery View (per album) -------------------
 async function refreshGalleryView() {
-try {
-albumImages = await getImageRecordsByAlbum(currentAlbumId);
-} catch (e) {
-console.error('Failed to get images for album', currentAlbumId, e);
-albumImages = [];
-}
-gallery.innerHTML = '';
-let totalBytes = 0;
-try {
-const allImages = await getAllRecords();
-allImages.forEach(it => totalBytes += (it.size||0));
-} catch {}
-stats.textContent = `${albumImages.length} items · ${fmtBytes(totalBytes)}`;
+  try {
+    albumImages = await getImageRecordsByAlbum(currentAlbumId);
+  } catch (e) {
+    console.error('Failed to get images for album', currentAlbumId, e);
+    albumImages = [];
+  }
 
-const currentAlbum = albums.find(a => a.id === currentAlbumId) || { name: 'Default' };
-pageTitle.innerHTML = `🖼️ ${currentAlbum.name} <span style="color:var(--accent)">📁</span>`;
+  gallery.innerHTML = '';
 
-const hasImages = albumImages.length > 0;
-exportAllBtn.disabled = !hasImages;
-clearAllBtn.disabled = !hasImages;
-selectAllBtn.disabled = !hasImages;
-emptyState.classList.toggle('hidden', albumImages.length !== 0);
-dropzone.classList.toggle('hidden', currentAlbumId !== 'default');
+  // ✅ Compute size ONLY for current album
+  let albumBytes = 0;
+  albumImages.forEach(it => albumBytes += (it.size || 0));
+  stats.textContent = `${albumImages.length} items · ${fmtBytes(albumBytes)}`;
 
-albumImages.sort((a,b)=> (b.addedAt||0) - (a.addedAt||0));
-for(const it of albumImages){
-let blob;
-try{
-const plainAB = await decryptToArrayBuffer(it.iv, it.cipher);
-blob = arrayBufferToBlob(plainAB, it.type || 'image/*');
-}catch(err){
-console.error('Decryption failed for', it.id, err);
-const cardErr = document.createElement('div');
-cardErr.className = 'card';
-cardErr.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:13px">Unable to decrypt "${it.name}"</div>`;
-gallery.appendChild(cardErr);
-continue;
-}
-const url = URL.createObjectURL(blob);
-const card = document.createElement('div');
-card.className = 'card';
-card.innerHTML = `
-<div class="select"><input type="checkbox" aria-label="Select ${it.name}" ${selections.has(it.id)?'checked':''}></div>
-<img class="thumb" src="${url}" alt="${it.name}">
-<div class="meta">
-<div class="name" title="${it.name}">${it.name}</div>
-<div class="badge">${(it.type||'image').split('/').pop().toUpperCase()}</div>
-</div>
-<div class="actions">
-<button data-act="view">View</button>
-<button data-act="del">Del</button>
-<button data-act="dl">DL</button>
-</div>
-`;
-const cb = card.querySelector('input[type=checkbox]');
-cb.addEventListener('change', () => {
-if(cb.checked) selections.add(it.id); else selections.delete(it.id);
-updateSelectionButtons();
-});
-card.querySelector('[data-act=view]').addEventListener('click',()=>{
-viewerImg.src = url; viewerName.textContent = it.name; viewer.showModal();
-});
-card.querySelector('[data-act=del]').addEventListener('click', async ()=>{
-if(confirm(`Delete "${it.name}"?`)){
-await deleteImageRecord(it.id);
-selections.delete(it.id);
-refreshGalleryView();
-}
-});
-card.querySelector('[data-act=dl]').addEventListener('click',()=>{
-const a = document.createElement('a');
-a.href = url; a.download = it.name || 'image'; a.click();
-});
-card.querySelector('.thumb').addEventListener('click',()=>{
-cb.checked=!cb.checked;
-cb.dispatchEvent(new Event('change'));
-});
-gallery.appendChild(card);
-}
-updateSelectionButtons();
+  const currentAlbum = albums.find(a => a.id === currentAlbumId) || { name: 'Default' };
+  pageTitle.innerHTML = `🖼️ ${currentAlbum.name} <span style="color:var(--accent)">📁</span>`;
+
+  const hasImages = albumImages.length > 0;
+  exportAllBtn.disabled = !hasImages;
+  clearAllBtn.disabled = !hasImages;
+  selectAllBtn.disabled = !hasImages;
+  emptyState.classList.toggle('hidden', albumImages.length !== 0);
+  dropzone.classList.toggle('hidden', currentAlbumId !== 'default');
+
+  albumImages.sort((a,b)=> (b.addedAt||0) - (a.addedAt||0));
+  for(const it of albumImages){
+    let blob;
+    try{
+      const plainAB = await decryptToArrayBuffer(it.iv, it.cipher);
+      blob = arrayBufferToBlob(plainAB, it.type || 'image/*');
+    }catch(err){
+      console.error('Decryption failed for', it.id, err);
+      const cardErr = document.createElement('div');
+      cardErr.className = 'card';
+      cardErr.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:13px">Unable to decrypt "${it.name}"</div>`;
+      gallery.appendChild(cardErr);
+      continue;
+    }
+    const url = URL.createObjectURL(blob);
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="select"><input type="checkbox" aria-label="Select ${it.name}" ${selections.has(it.id)?'checked':''}></div>
+      <img class="thumb" src="${url}" alt="${it.name}">
+      <div class="meta">
+        <div class="name" title="${it.name}">${it.name}</div>
+        <div class="badge">${(it.type||'image').split('/').pop().toUpperCase()}</div>
+      </div>
+      <div class="actions">
+        <button data-act="view">View</button>
+        <button data-act="del">Del</button>
+        <button data-act="dl">DL</button>
+      </div>
+    `;
+    const cb = card.querySelector('input[type=checkbox]');
+    cb.addEventListener('change', () => {
+      if(cb.checked) selections.add(it.id); else selections.delete(it.id);
+      updateSelectionButtons();
+    });
+    card.querySelector('[data-act=view]').addEventListener('click',()=>{
+      viewerImg.src = url; viewerName.textContent = it.name; viewer.showModal();
+    });
+    card.querySelector('[data-act=del]').addEventListener('click', async()=>{
+      if(confirm(`Delete "${it.name}"?`)){
+        await deleteImageRecord(it.id);
+        selections.delete(it.id);
+        refreshGalleryView();
+      }
+    });
+    card.querySelector('[data-act=dl]').addEventListener('click',()=>{
+      const a = document.createElement('a');
+      a.href = url; a.download = it.name || 'image'; a.click();
+    });
+    card.querySelector('.thumb').addEventListener('click',()=>{
+      cb.checked=!cb.checked;
+      cb.dispatchEvent(new Event('change'));
+    });
+    gallery.appendChild(card);
+  }
+  updateSelectionButtons();
 }
 
 function updateSelectionButtons(){
-const hasSel = selections.size>0;
-exportSelBtn.disabled = !hasSel;
-clearSelBtn.disabled = !hasSel;
+  const hasSel = selections.size>0;
+  exportSelBtn.disabled = !hasSel;
+  clearSelBtn.disabled = !hasSel;
 }
 
 // ------------------ Navigation -------------------
 function switchToDashboard() {
-dashboardView.classList.remove('hidden');
-galleryView.classList.add('hidden');
-pageTitle.innerHTML = `Gallery Dashboard <span style="color:var(--accent)">📁</span>`;
-dashboardActions.style.display = 'flex';
-albumActionsGroup.style.display = 'none';
-selections.clear();
+  dashboardView.classList.remove('hidden');
+  galleryView.classList.add('hidden');
+  pageTitle.innerHTML = `Gallery Dashboard <span style="color:var(--accent)">📁</span>`;
+  dashboardActions.style.display = 'flex';
+  albumActionsGroup.style.display = 'none';
+  selections.clear();
+  stats.classList.add('hidden'); // ✅ hide stats in dashboard
 }
 
 function switchToAlbum(albumId) {
-currentAlbumId = albumId;
-dashboardView.classList.add('hidden');
-galleryView.classList.remove('hidden');
-refreshGalleryView();
-dashboardActions.style.display = 'none';
-albumActionsGroup.style.display = 'flex';
+  currentAlbumId = albumId;
+  dashboardView.classList.add('hidden');
+  galleryView.classList.remove('hidden');
+  refreshGalleryView();
+  dashboardActions.style.display = 'none';
+  albumActionsGroup.style.display = 'flex';
+  stats.classList.remove('hidden'); // ✅ show stats in gallery
 }
 
 // ------------------ Export / Import -------------------
 async function exportByIds(ids, albumName = null){
-const records = (await getManyRecords(ids)).filter(Boolean);
-const images = [];
-for(const r of records){
-try{
-const plainAB = await decryptToArrayBuffer(r.iv, r.cipher);
-const blob = arrayBufferToBlob(plainAB, r.type);
-const dataURL = await blobToDataURL(blob);
-images.push({
-id: r.id,
-name: r.name,
-type: r.type,
-size: r.size,
-lastModified: r.lastModified,
-addedAt: r.addedAt,
-dataURL
-});
-}catch(err){
-alert('Failed to decrypt for export. Aborted.');
-return;
-}
-}
-const payload = {
-version:2,
-exportedAt: new Date().toISOString(),
-albumId: albumName ? uid() : null,
-albumName: albumName,
-images
-};
-const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
-const a = document.createElement('a');
-const timestamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-const filename = albumName
-? `gallery1-album-${albumName}-${timestamp}.json`
-: `gallery1-export-${timestamp}.json`;
-a.href = URL.createObjectURL(blob);
-a.download = filename;
-a.click();
+  const records = (await getManyRecords(ids)).filter(Boolean);
+  const images = [];
+  for(const r of records){
+    try{
+      const plainAB = await decryptToArrayBuffer(r.iv, r.cipher);
+      const blob = arrayBufferToBlob(plainAB, r.type);
+      const dataURL = await blobToDataURL(blob);
+      images.push({
+        id: r.id,
+        name: r.name,
+        type: r.type,
+        size: r.size,
+        lastModified: r.lastModified,
+        addedAt: r.addedAt,
+        dataURL
+      });
+    }catch(err){
+      alert('Failed to decrypt for export. Aborted.');
+      return;
+    }
+  }
+  const payload = {
+    version:2,
+    exportedAt: new Date().toISOString(),
+    albumId: albumName ? uid() : null,
+    albumName: albumName,
+    images
+  };
+  const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
+  const a = document.createElement('a');
+  const timestamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+  const filename = albumName
+    ? `gallery1-album-${albumName}-${timestamp}.json`
+    : `gallery1-export-${timestamp}.json`;
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
 }
 async function exportAlbumById(albumId) {
-const album = albums.find(a => a.id === albumId);
-if (!album) return;
-const images = await getImageRecordsByAlbum(albumId);
-if (images.length === 0) {
-alert('This album is empty');
-return;
-}
-await exportByIds(images.map(i => i.id), album.name);
+  const album = albums.find(a => a.id === albumId);
+  if (!album) return;
+  const images = await getImageRecordsByAlbum(albumId);
+  if (images.length === 0) {
+    alert('This album is empty');
+    return;
+  }
+  await exportByIds(images.map(i => i.id), album.name);
 }
 async function exportAllAlbums() {
-const allImages = await getAllRecords();
-if (allImages.length === 0) {
-alert('No images to export');
-return;
-}
-const albumsMap = new Map();
-for (const img of allImages) {
-const albumId = img.albumId || 'default';
-if (!albumsMap.has(albumId)) {
-const album = albums.find(a => a.id === albumId) || { name: 'Default' };
-albumsMap.set(albumId, {
-albumId,
-albumName: album.name,
-images: []
-});
-}
-albumsMap.get(albumId).images.push(img);
-}
-const albumExports = [];
-for (const [albumId, data] of albumsMap) {
-const imagesData = [];
-for (const img of data.images) {
-try {
-const plainAB = await decryptToArrayBuffer(img.iv, img.cipher);
-const blob = arrayBufferToBlob(plainAB, img.type);
-const dataURL = await blobToDataURL(blob);
-imagesData.push({
-id: img.id,
-name: img.name,
-type: img.type,
-size: img.size,
-lastModified: img.lastModified,
-addedAt: img.addedAt,
-dataURL
-});
-} catch (err) {
-alert(`Failed to decrypt "${img.name}". Export aborted.`);
-return;
-}
-}
-albumExports.push({
-albumId,
-albumName: data.albumName,
-images: imagesData
-});
-}
-const payload = {
-version: 2,
-exportedAt: new Date().toISOString(),
-allAlbums: true,
-albums: albumExports
-};
-const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
-const a = document.createElement('a');
-const timestamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-a.href = URL.createObjectURL(blob);
-a.download = `gallery1-all-albums-${timestamp}.json`;
-a.click();
+  const allImages = await getAllRecords();
+  if (allImages.length === 0) {
+    alert('No images to export');
+    return;
+  }
+  const albumsMap = new Map();
+  for (const img of allImages) {
+    const albumId = img.albumId || 'default';
+    if (!albumsMap.has(albumId)) {
+      const album = albums.find(a => a.id === albumId) || { name: 'Default' };
+      albumsMap.set(albumId, {
+        albumId,
+        albumName: album.name,
+        images: []
+      });
+    }
+    albumsMap.get(albumId).images.push(img);
+  }
+  const albumExports = [];
+  for (const [albumId, data] of albumsMap) {
+    const imagesData = [];
+    for (const img of data.images) {
+      try {
+        const plainAB = await decryptToArrayBuffer(img.iv, img.cipher);
+        const blob = arrayBufferToBlob(plainAB, img.type);
+        const dataURL = await blobToDataURL(blob);
+        imagesData.push({
+          id: img.id,
+          name: img.name,
+          type: img.type,
+          size: img.size,
+          lastModified: img.lastModified,
+          addedAt: img.addedAt,
+          dataURL
+        });
+      } catch (err) {
+        alert(`Failed to decrypt "${img.name}". Export aborted.`);
+        return;
+      }
+    }
+    albumExports.push({
+      albumId,
+      albumName: data.albumName,
+      images: imagesData
+    });
+  }
+  const payload = {
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    allAlbums: true,
+    albums: albumExports
+  };
+  const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
+  const a = document.createElement('a');
+  const timestamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+  a.href = URL.createObjectURL(blob);
+  a.download = `gallery1-all-albums-${timestamp}.json`;
+  a.click();
 }
 async function handleImport(file, targetAlbumId = null){
-try{
-const text = await file.text();
-const payload = JSON.parse(text);
-let importedCount = 0;
-if (payload.version === 2 && payload.allAlbums && payload.albums) {
-for (const albumData of payload.albums) {
-const newAlbumId = uid();
-const albumRecord = {
-id: newAlbumId,
-name: albumData.albumName,
-createdAt: Date.now(),
-imageCount: 0
-};
-await putAlbumRecord(albumRecord);
-albums.push(albumRecord);
-for(const img of albumData.images){
-const blob = await (await fetch(img.dataURL)).blob();
-const ab = await blobToArrayBuffer(blob);
-const enc = await encryptArrayBuffer(ab);
-const rec = {
-id: uid(),
-name: img.name||'imported-image',
-type: blob.type||img.type||'image/*',
-size: blob.size||img.size,
-lastModified: img.lastModified||Date.now(),
-addedAt: Date.now(),
-cipher: enc.cipher,
-iv: enc.iv,
-albumId: newAlbumId
-};
-await putImageRecord(rec);
-importedCount++;
-}
-}
-alert(`✅ Imported ${payload.albums.length} album(s) with ${importedCount} total images.`);
-await refreshDashboard();
-} else if (payload.version === 2 && payload.albumName && payload.images) {
-let albumId = targetAlbumId;
-if (!albumId) {
-const newAlbumId = uid();
-const albumRecord = {
-id: newAlbumId,
-name: payload.albumName,
-createdAt: Date.now(),
-imageCount: 0
-};
-await putAlbumRecord(albumRecord);
-albumId = newAlbumId;
-albums.push(albumRecord);
-}
-for(const img of payload.images){
-const blob = await (await fetch(img.dataURL)).blob();
-const ab = await blobToArrayBuffer(blob);
-const enc = await encryptArrayBuffer(ab);
-const rec = {
-id: uid(),
-name: img.name||'imported-image',
-type: blob.type||img.type||'image/*',
-size: blob.size||img.size,
-lastModified: img.lastModified||Date.now(),
-addedAt: Date.now(),
-cipher: enc.cipher,
-iv: enc.iv,
-albumId: albumId
-};
-await putImageRecord(rec);
-importedCount++;
-}
-alert(`✅ Imported ${importedCount} image(s) to album "${payload.albumName}".`);
-if (currentAlbumId === albumId) refreshGalleryView();
-else if (!targetAlbumId) switchToAlbum(albumId);
-} else if (payload && payload.images) {
-const targetId = targetAlbumId || currentAlbumId;
-for(const img of payload.images){
-const blob = await (await fetch(img.dataURL)).blob();
-const ab = await blobToArrayBuffer(blob);
-const enc = await encryptArrayBuffer(ab);
-const rec = {
-id: uid(),
-name: img.name||'imported-image',
-type: blob.type||img.type||'image/*',
-size: blob.size||img.size,
-lastModified: img.lastModified||Date.now(),
-addedAt: Date.now(),
-cipher: enc.cipher,
-iv: enc.iv,
-albumId: targetId
-};
-await putImageRecord(rec);
-}
-alert(`✅ Imported ${payload.images.length} image(s).`);
-if (currentAlbumId === targetId) refreshGalleryView();
-} else {
-throw new Error('Invalid file');
-}
-}catch(err){
-console.error(err);
-alert('❌ Import failed: '+ err.message);
-}
+  try{
+    const text = await file.text();
+    const payload = JSON.parse(text);
+    let importedCount = 0;
+    if (payload.version === 2 && payload.allAlbums && payload.albums) {
+      for (const albumData of payload.albums) {
+        const newAlbumId = uid();
+        const albumRecord = {
+          id: newAlbumId,
+          name: albumData.albumName,
+          createdAt: Date.now(),
+          imageCount: 0
+        };
+        await putAlbumRecord(albumRecord);
+        albums.push(albumRecord);
+        for(const img of albumData.images){
+          const blob = await (await fetch(img.dataURL)).blob();
+          const ab = await blobToArrayBuffer(blob);
+          const enc = await encryptArrayBuffer(ab);
+          const rec = {
+            id: uid(),
+            name: img.name||'imported-image',
+            type: blob.type||img.type||'image/*',
+            size: blob.size||img.size,
+            lastModified: img.lastModified||Date.now(),
+            addedAt: Date.now(),
+            cipher: enc.cipher,
+            iv: enc.iv,
+            albumId: newAlbumId
+          };
+          await putImageRecord(rec);
+          importedCount++;
+        }
+      }
+      alert(`✅ Imported ${payload.albums.length} album(s) with ${importedCount} total images.`);
+      await refreshDashboard();
+    } else if (payload.version === 2 && payload.albumName && payload.images) {
+      let albumId = targetAlbumId;
+      if (!albumId) {
+        const newAlbumId = uid();
+        const albumRecord = {
+          id: newAlbumId,
+          name: payload.albumName,
+          createdAt: Date.now(),
+          imageCount: 0
+        };
+        await putAlbumRecord(albumRecord);
+        albumId = newAlbumId;
+        albums.push(albumRecord);
+      }
+      for(const img of payload.images){
+        const blob = await (await fetch(img.dataURL)).blob();
+        const ab = await blobToArrayBuffer(blob);
+        const enc = await encryptArrayBuffer(ab);
+        const rec = {
+          id: uid(),
+          name: img.name||'imported-image',
+          type: blob.type||img.type||'image/*',
+          size: blob.size||img.size,
+          lastModified: img.lastModified||Date.now(),
+          addedAt: Date.now(),
+          cipher: enc.cipher,
+          iv: enc.iv,
+          albumId: albumId
+        };
+        await putImageRecord(rec);
+        importedCount++;
+      }
+      alert(`✅ Imported ${importedCount} image(s) to album "${payload.albumName}".`);
+      if (currentAlbumId === albumId) refreshGalleryView();
+      else if (!targetAlbumId) switchToAlbum(albumId);
+    } else if (payload && payload.images) {
+      const targetId = targetAlbumId || currentAlbumId;
+      for(const img of payload.images){
+        const blob = await (await fetch(img.dataURL)).blob();
+        const ab = await blobToArrayBuffer(blob);
+        const enc = await encryptArrayBuffer(ab);
+        const rec = {
+          id: uid(),
+          name: img.name||'imported-image',
+          type: blob.type||img.type||'image/*',
+          size: blob.size||img.size,
+          lastModified: img.lastModified||Date.now(),
+          addedAt: Date.now(),
+          cipher: enc.cipher,
+          iv: enc.iv,
+          albumId: targetId
+        };
+        await putImageRecord(rec);
+      }
+      alert(`✅ Imported ${payload.images.length} image(s).`);
+      if (currentAlbumId === targetId) refreshGalleryView();
+    } else {
+      throw new Error('Invalid file');
+    }
+  }catch(err){
+    console.error(err);
+    alert('❌ Import failed: '+ err.message);
+  }
 }
 function blobToDataURL(blob){
-return new Promise((resolve,reject)=>{
-const fr = new FileReader();
-fr.onload=()=>resolve(fr.result);
-fr.onerror=()=>reject(fr.error);
-fr.readAsDataURL(blob);
-});
+  return new Promise((resolve,reject)=>{
+    const fr = new FileReader();
+    fr.onload=()=>resolve(fr.result);
+    fr.onerror=()=>reject(fr.error);
+    fr.readAsDataURL(blob);
+  });
 }
 async function ingestFiles(fileList){
-const files = Array.from(fileList).filter(f=> f.type && f.type.startsWith('image/'));
-if(files.length===0){
-alert('Please choose image files (including GIFs).');
-return;
-}
-for(const f of files){
-const ab = await blobToArrayBuffer(f);
-const enc = await encryptArrayBuffer(ab);
-const rec = {
-id: uid(),
-name: f.name,
-type: f.type,
-size: f.size,
-lastModified: f.lastModified,
-addedAt: Date.now(),
-cipher: enc.cipher,
-iv: enc.iv,
-albumId: currentAlbumId
-};
-await putImageRecord(rec);
-}
-refreshGalleryView();
+  const files = Array.from(fileList).filter(f=> f.type && f.type.startsWith('image/'));
+  if(files.length===0){
+    alert('Please choose image files (including GIFs).');
+    return;
+  }
+  for(const f of files){
+    const ab = await blobToArrayBuffer(f);
+    const enc = await encryptArrayBuffer(ab);
+    const rec = {
+      id: uid(),
+      name: f.name,
+      type: f.type,
+      size: f.size,
+      lastModified: f.lastModified,
+      addedAt: Date.now(),
+      cipher: enc.cipher,
+      iv: enc.iv,
+      albumId: currentAlbumId
+    };
+    await putImageRecord(rec);
+  }
+  refreshGalleryView();
 }
 
 // ------------------ Event Listeners -------------------
 fileInput.addEventListener('change', e=>{
-if(e.target.files?.length) ingestFiles(e.target.files);
-e.target.value='';
+  if(e.target.files?.length) ingestFiles(e.target.files);
+  e.target.value='';
 });
 importInput.addEventListener('change', e=>{
-if(e.target.files?.length) handleImport(e.target.files[0]);
-e.target.value='';
+  if(e.target.files?.length) handleImport(e.target.files[0]);
+  e.target.value='';
 });
 importAlbumInput.addEventListener('change', e=>{
-if(e.target.files?.length && currentActionAlbum) {
-handleImport(e.target.files[0], currentActionAlbum.id);
-}
-e.target.value='';
+  if(e.target.files?.length && currentActionAlbum) {
+    handleImport(e.target.files[0], currentActionAlbum.id);
+  }
+  e.target.value='';
 });
 restoreAllInput.addEventListener('change', e=>{
-if(e.target.files?.length) {
-handleImport(e.target.files[0]);
-}
-e.target.value='';
+  if(e.target.files?.length) {
+    handleImport(e.target.files[0]);
+  }
+  e.target.value='';
 });
 dropzone.addEventListener('dragover', e=>{
-e.preventDefault();
-dropzone.classList.add('dragover');
+  e.preventDefault();
+  dropzone.classList.add('dragover');
 });
 dropzone.addEventListener('dragleave', ()=> dropzone.classList.remove('dragover'));
 dropzone.addEventListener('drop', e=>{
-e.preventDefault();
-dropzone.classList.remove('dragover');
-if(e.dataTransfer.files?.length) ingestFiles(e.dataTransfer.files);
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  if(e.dataTransfer.files?.length) ingestFiles(e.dataTransfer.files);
 });
 backToDashboard.addEventListener('click', (e) => {
-e.preventDefault();
-switchToDashboard();
+  e.preventDefault();
+  switchToDashboard();
 });
 fixedBackBtn.addEventListener('click', (e) => {
-e.preventDefault();
-switchToDashboard();
+  e.preventDefault();
+  switchToDashboard();
 });
-selectAllBtn.addEventListener('click', async ()=>{
-const items = await getImageRecordsByAlbum(currentAlbumId);
-selections = new Set(items.map(i=>i.id));
-refreshGalleryView();
+selectAllBtn.addEventListener('click', async()=>{
+  const items = await getImageRecordsByAlbum(currentAlbumId);
+  selections = new Set(items.map(i=>i.id));
+  refreshGalleryView();
 });
-clearSelBtn.addEventListener('click', async ()=>{
-if(!selections.size) return;
-if(!confirm(`Delete ${selections.size} selected item(s)?`)) return;
-for(const id of selections){
-await deleteImageRecord(id);
-}
-selections.clear();
-refreshGalleryView();
+clearSelBtn.addEventListener('click', async()=>{
+  if(!selections.size) return;
+  if(!confirm(`Delete ${selections.size} selected item(s)?`)) return;
+  for(const id of selections){
+    await deleteImageRecord(id);
+  }
+  selections.clear();
+  refreshGalleryView();
 });
-clearAllBtn.addEventListener('click', async ()=>{
-if(!confirm(`Delete ALL images in this album?`)) return;
-const items = await getImageRecordsByAlbum(currentAlbumId);
-for (const item of items) {
-await deleteImageRecord(item.id);
-}
-selections.clear();
-refreshGalleryView();
+clearAllBtn.addEventListener('click', async()=>{
+  if(!confirm(`Delete ALL images in this album?`)) return;
+  const items = await getImageRecordsByAlbum(currentAlbumId);
+  for (const item of items) {
+    await deleteImageRecord(item.id);
+  }
+  selections.clear();
+  refreshGalleryView();
 });
-exportSelBtn.addEventListener('click', async ()=>{
-if(selections.size) exportByIds(Array.from(selections));
+exportSelBtn.addEventListener('click', async()=>{
+  if(selections.size) exportByIds(Array.from(selections));
 });
-exportAllBtn.addEventListener('click', async ()=>{
-const items = await getImageRecordsByAlbum(currentAlbumId);
-if(items.length) exportByIds(items.map(i=>i.id));
+exportAllBtn.addEventListener('click', async()=>{
+  const items = await getImageRecordsByAlbum(currentAlbumId);
+  if(items.length) exportByIds(items.map(i=>i.id));
 });
 newAlbumBtn.addEventListener('click', () => {
-albumNameInput.value = '';
-albumDialog.showModal();
+  albumNameInput.value = '';
+  albumDialog.showModal();
 });
 createAlbumBtn.addEventListener('click', () => {
-createAlbum(albumNameInput.value);
+  createAlbum(albumNameInput.value);
 });
 exportAlbumBtn.addEventListener('click', async () => {
-if (currentActionAlbum) {
-await exportAlbumById(currentActionAlbum.id);
-}
-albumActionsDialog.close();
+  if (currentActionAlbum) {
+    await exportAlbumById(currentActionAlbum.id);
+  }
+  albumActionsDialog.close();
 });
 deleteAlbumBtn.addEventListener('click', async () => {
-if (currentActionAlbum && confirm(`Delete album "${currentActionAlbum.name}" and all its images?`)) {
-await deleteAlbum(currentActionAlbum.id);
-albumActionsDialog.close();
-}
+  if (currentActionAlbum && confirm(`Delete album "${currentActionAlbum.name}" and all its images?`)) {
+    await deleteAlbum(currentActionAlbum.id);
+    albumActionsDialog.close();
+  }
 });
 backupAllBtn.addEventListener('click', exportAllAlbums);
 viewer.addEventListener('click', (e) => { if (e.target === viewer) viewer.close(); });
@@ -1036,15 +1073,16 @@ albumActionsDialog.addEventListener('click', (e) => { if (e.target === albumActi
 
 // ------------------ Boot -------------------
 (async function init(){
-try{
-db = await openDB();
-await ensureDefaultAlbum();
-await ensureSaltAndKey("lkjh");
-await refreshDashboard();
-}catch(err){
-console.error('Init error', err);
-alert('Initialization failed: '+err.message);
-}
+  try{
+    db = await openDB();
+    await ensureDefaultAlbum();
+    await ensureSaltAndKey("lkjh");
+    await refreshDashboard();
+    stats.classList.add('hidden'); // start hidden
+  }catch(err){
+    console.error('Init error', err);
+    alert('Initialization failed: '+err.message);
+  }
 })();
 </script>
 </body>
