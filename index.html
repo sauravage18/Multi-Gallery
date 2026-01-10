@@ -51,31 +51,11 @@ padding: 16px;
 background: linear-gradient(135deg, #161a36, #2a1e5a);
 border: 1px solid #22265a;
 border-radius: 14px;
-transition: transform 0.2s, background 0.2s;
 cursor: pointer;
+/* Animation removed for speed */
 }
 .album-list-item:hover {
-transform: translateY(-2px);
 background: linear-gradient(135deg, #1a1f3d, #2d215d);
-z-index: 2;
-}
-.album-thumb-list {
-width: 64px;
-height: 64px;
-border-radius: 8px;
-background: #0a0d20;
-flex-shrink: 0;
-display: flex;
-align-items: center;
-justify-content: center;
-color: var(--muted);
-font-size: 12px;
-}
-.album-thumb-preview {
-width: 100%;
-height: 100%;
-object-fit: cover;
-border-radius: 8px;
 }
 .album-info {
 flex: 1;
@@ -84,16 +64,11 @@ min-width: 0;
 .album-name-list {
 font-size: 18px;
 font-weight: bold;
-margin: 0 0 4px;
+margin: 0;
 color: var(--text);
 overflow: hidden;
 text-overflow: ellipsis;
 white-space: nowrap;
-}
-.album-meta-list {
-font-size: 13px;
-color: var(--muted);
-margin: 0;
 }
 .album-actions {
 display: flex;
@@ -577,7 +552,6 @@ for (const img of imagesToDelete) {
 await deleteImageRecord(img.id);
 }
 await deleteAlbumRecord(albumId);
-// Fix: Directly refresh dashboard after deletion
 if (currentAlbumId === albumId) {
 switchToDashboard();
 } else {
@@ -613,15 +587,9 @@ try { await putAlbumRecord(album); } catch {}
 const listItem = document.createElement('div');
 listItem.className = 'album-list-item';
 listItem.dataset.albumId = album.id;
-let thumbContent = `<div class="album-thumb-list">📁</div>`;
-if (images.length > 0) {
-thumbContent = `<div class="album-thumb-list"><div class="album-thumb-preview" style="background:#333;"></div></div>`;
-}
 listItem.innerHTML = `
-${thumbContent}
 <div class="album-info">
 <div class="album-name-list">${album.name}</div>
-<div class="album-meta-list">${images.length} image${images.length !== 1 ? 's' : ''}</div>
 </div>
 <div class="album-actions">
 <button class="album-action-btn" data-action="manage" title="Manage Album">⚙️</button>
@@ -720,7 +688,6 @@ exportSelBtn.disabled = !hasSel;
 clearSelBtn.disabled = !hasSel;
 }
 
-// Fix: Ensure dashboard is refreshed when switching back
 async function switchToDashboard() {
 dashboardView.classList.remove('hidden');
 galleryView.classList.add('hidden');
@@ -730,7 +697,7 @@ dashboardActions.style.display = 'flex';
 albumActionsGroup.style.display = 'none';
 selections.clear();
 stats.classList.add('hidden');
-await refreshDashboard(); // Refresh counts when returning
+await refreshDashboard();
 }
 
 function switchToAlbum(albumId) {
