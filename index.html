@@ -175,6 +175,7 @@ flex: 1;
 <div class="toolbar">
 <div class="toolbar-group" id="dashboardActions">
 <button id="newAlbumBtn">📁 Create Album</button>
+<button id="refreshCacheBtn">🔄 Refresh Cache</button>
 </div>
 <div class="toolbar-group" id="albumActionsGroup" style="display:none">
 <label class="file-label" title="Choose images">
@@ -454,6 +455,7 @@ const exportAlbumBtn = $('#exportAlbum');
 const importAlbumInput = $('#importAlbumInput');
 const deleteAlbumBtn = $('#deleteAlbum');
 const backupAllBtn = $('#backupAllBtn');
+const refreshCacheBtn = $('#refreshCacheBtn');
 const restoreAllInput = $('#restoreAllInput');
 const backBtnContainer = $('#backBtnContainer');
 const pageTitleCenter = $('#pageTitleCenter');
@@ -551,15 +553,68 @@ albumActionsTitle.textContent = `Album: ${album.name}`;
 albumActionsDialog.showModal();
 }
 
+async function refreshAlbumCache() {
+try {
+const allAlbums = await getAllAlbums();
+const userAlbums = allAlbums.filter(a => a.id !== 'default');
+if (userAlbums.length === 0) {
+await metaPut('all-album-cache', {
+version: 1,
+lastUpdated: Date.now(),
+albums: []
+});
+return;
+}
+const albumIds = userAlbums.map(a => a.id);
+const requests = albumIds.map(albumId => getImageRecordsByAlbum(albumId));
+const results = await Promise.all(requests);
+const albumsWithCounts = userAlbums.map((album, index) => ({
+id: album.id,
+name: album.name,
+createdAt: album.createdAt || Date.now(),
+imageCount: results[index] ? results[index].length : 0
+}));
+const cacheData = {
+version: 1,
+lastUpdated: Date.now(),
+albums: albumsWithCounts
+};
+await metaPut('all-album-cache', cacheData);
+return cacheData;
+} catch (e) {
+console.error('Failed to refresh cache', e);
+throw e;
+}
+}
+
 async function refreshDashboard() {
+let userAlbums = [];
+try {
+const cacheData = await metaGet('all-album-cache');
+if (cacheData && cacheData.version === 1 && Array.isArray(cacheData.albums)) {
+userAlbums = cacheData.albums;
+albums = await getAllAlbums();
+} else {
+throw new Error('No valid cache');
+}
+} catch (e) {
 try {
 albums = await getAllAlbums();
-} catch (e) {
+const allUserAlbums = albums.filter(a => a.id !== 'default');
+const albumIds = allUserAlbums.map(a => a.id);
+const requests = albumIds.map(albumId => getImageRecordsByAlbum(albumId));
+const results = await Promise.all(requests);
+userAlbums = allUserAlbums.map((album, index) => ({
+id: album.id,
+name: album.name,
+createdAt: album.createdAt || Date.now(),
+imageCount: results[index] ? results[index].length : 0
+}));
+} catch (err) {
 albums = [];
+userAlbums = [];
 }
-// Filter out default album
-const userAlbums = albums.filter(a => a.id !== 'default');
-
+}
 // SORT ALPHABETICALLY (A-Z)
 userAlbums.sort((a, b) => a.name.localeCompare(b.name, undefined, {sensitivity: 'base'}));
 
@@ -573,12 +628,6 @@ noAlbums.classList.toggle('hidden', userAlbums.length > 0);
 if (userAlbums.length === 0) return;
 
 for (const album of userAlbums) {
-let images = [];
-try { images = await getImageRecordsByAlbum(album.id); } catch {}
-album.imageCount = images.length;
-if (album.id !== 'default') {
-try { await putAlbumRecord(album); } catch {}
-}
 const listItem = document.createElement('div');
 listItem.className = 'album-list-item';
 listItem.dataset.albumId = album.id;
@@ -1191,6 +1240,24 @@ albumActionsDialog.close();
 }
 });
 backupAllBtn.addEventListener('click', backupAllToZip);
+refreshCacheBtn.addEventListener('click', async () => {
+refreshCacheBtn.disabled = true;
+refreshCacheBtn.textContent = '⏳ Refreshing...';
+try {
+await refreshAlbumCache();
+await refreshDashboard();
+refreshCacheBtn.textContent = '✅ Cache Refreshed';
+setTimeout(() => {
+refreshCacheBtn.textContent = '🔄 Refresh Cache';
+refreshCacheBtn.disabled = false;
+}, 2000);
+} catch (err) {
+console.error('Cache refresh failed', err);
+alert('Failed to refresh cache: ' + err.message);
+refreshCacheBtn.textContent = '🔄 Refresh Cache';
+refreshCacheBtn.disabled = false;
+}
+});
 viewer.addEventListener('click', (e) => { if (e.target === viewer) viewer.close(); });
 albumDialog.addEventListener('click', (e) => { if (e.target === albumDialog) albumDialog.close(); });
 albumActionsDialog.addEventListener('click', (e) => { if (e.target === albumActionsDialog) albumActionsDialog.close(); });
