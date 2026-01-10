@@ -52,7 +52,6 @@ background: linear-gradient(135deg, #161a36, #2a1e5a);
 border: 1px solid #22265a;
 border-radius: 14px;
 cursor: pointer;
-/* Animation removed for speed */
 }
 .album-list-item:hover {
 background: linear-gradient(135deg, #1a1f3d, #2d215d);
@@ -397,18 +396,6 @@ const fmtBytes = n => (n? (n/1024/1024).toFixed(2):'0.00')+ ' MB';
 const uid = () => crypto.randomUUID ? crypto.randomUUID() : (Date.now()+Math.random()).toString(36);
 async function blobToArrayBuffer(blob){ return await blob.arrayBuffer(); }
 function arrayBufferToBlob(ab, type){ return new Blob([ab], { type: type || 'application/octet-stream' }); }
-function u8aToBase64(u8a){
-let binary = '';
-const len = u8a.byteLength;
-for(let i=0;i<len;i++) binary += String.fromCharCode(u8a[i]);
-return btoa(binary);
-}
-function base64ToU8a(b64){
-const bin = atob(b64);
-const u8 = new Uint8Array(bin.length);
-for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
-return u8;
-}
 
 async function deriveKeyFromPassword(password, saltBytes){
 const enc = new TextEncoder();
@@ -563,20 +550,28 @@ currentActionAlbum = album;
 albumActionsTitle.textContent = `Album: ${album.name}`;
 albumActionsDialog.showModal();
 }
+
 async function refreshDashboard() {
 try {
 albums = await getAllAlbums();
 } catch (e) {
 albums = [];
 }
+// Filter out default album
 const userAlbums = albums.filter(a => a.id !== 'default');
+
+// SORT ALPHABETICALLY (A-Z)
+userAlbums.sort((a, b) => a.name.localeCompare(b.name, undefined, {sensitivity: 'base'}));
+
 const totalAlbums = userAlbums.length;
 const albumWord = totalAlbums === 1 ? 'album' : 'albums';
 $('#dashboardMeta').textContent = totalAlbums > 0 ? `${totalAlbums} ${albumWord}` : 'No albums';
+
 albumList.innerHTML = '';
 noAlbums.classList.toggle('hidden', userAlbums.length > 0);
+
 if (userAlbums.length === 0) return;
-userAlbums.sort((a, b) => b.createdAt - a.createdAt);
+
 for (const album of userAlbums) {
 let images = [];
 try { images = await getImageRecordsByAlbum(album.id); } catch {}
@@ -765,67 +760,6 @@ alert('This album is empty');
 return;
 }
 await exportByIds(images.map(i => i.id), album.name);
-}
-async function exportAllAlbums() {
-const allImages = await getAllRecords();
-if (allImages.length === 0) {
-alert('No images to export');
-return;
-}
-const albumsMap = new Map();
-for (const img of allImages) {
-const albumId = img.albumId || 'default';
-if (albumId === 'default') continue;
-if (!albumsMap.has(albumId)) {
-const album = albums.find(a => a.id === albumId) || { name: 'Default' };
-albumsMap.set(albumId, {
-albumId,
-albumName: album.name,
-images: []
-});
-}
-albumsMap.get(albumId).images.push(img);
-}
-const albumExports = [];
-for (const [albumId, data] of albumsMap) {
-const imagesData = [];
-for (const img of data.images) {
-try {
-const plainAB = await decryptToArrayBuffer(img.iv, img.cipher);
-const blob = arrayBufferToBlob(plainAB, img.type);
-const dataURL = await blobToDataURL(blob);
-imagesData.push({
-id: img.id,
-name: img.name,
-type: img.type,
-size: img.size,
-lastModified: img.lastModified,
-addedAt: img.addedAt,
-dataURL
-});
-} catch (err) {
-alert(`Failed to decrypt "${img.name}". Export aborted.`);
-return;
-}
-}
-albumExports.push({
-albumId,
-albumName: data.albumName,
-images: imagesData
-});
-}
-const payload = {
-version: 2,
-exportedAt: new Date().toISOString(),
-allAlbums: true,
-albums: albumExports
-};
-const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
-const a = document.createElement('a');
-const timestamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-a.href = URL.createObjectURL(blob);
-a.download = `gallery1-all-albums-${timestamp}.json`;
-a.click();
 }
 
 async function backupAllToZip() {
