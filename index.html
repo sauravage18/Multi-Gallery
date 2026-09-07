@@ -110,6 +110,10 @@ dialog{border:none;border-radius:16px;padding:0;max-width:95vw;background:#0e133
 .dashboard-title{font-size:24px;font-weight:bold;margin:0;color:var(--accent);}
 .dashboard-subtitle{color:var(--muted);margin-top:4px;font-size:14px}
 .dashboard-meta{color:var(--muted);margin-top:8px;font-size:13px}
+.dashboard-search{max-width:420px;margin:12px auto 0}
+.dashboard-search input{width:100%;background:#11163a;border:1px solid #2b2f66;color:var(--text);padding:10px 12px;border-radius:12px;outline:none;font-size:14px}
+.dashboard-search input::placeholder{color:var(--muted)}
+.dashboard-search input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(160,240,217,.18)}
 .dashboard-actions{display:flex;gap:10px;justify-content:center;margin-top:14px;flex-wrap:wrap}
 .back-btn {
 background: rgba(27,32,80,0.5);
@@ -200,6 +204,9 @@ flex: 1;
 <div id="dashboardView">
 <div class="dashboard-header">
 <div class="dashboard-meta" id="dashboardMeta">Loading...</div>
+<div class="dashboard-search">
+<input type="search" id="albumSearchInput" placeholder="Search albums..." aria-label="Search albums">
+</div>
 <div class="dashboard-actions">
 <button id="backupAllBtn" style="background:#00c9a7;color:#0a0d20">💾 Backup All (ZIP)</button>
 <label class="file-label" title="Restore all albums from ZIP">
@@ -444,7 +451,9 @@ const viewerName = $('#viewerName');
 const dashboardView = $('#dashboardView');
 const galleryView = $('#galleryView');
 const albumList = $('#albumList');
+const dashboardMeta = $('#dashboardMeta');
 const noAlbums = $('#noAlbums');
+const albumSearchInput = $('#albumSearchInput');
 const newAlbumBtn = $('#newAlbumBtn');
 const albumDialog = $('#albumDialog');
 const albumNameInput = $('#albumName');
@@ -619,15 +628,34 @@ userAlbums = [];
 userAlbums.sort((a, b) => a.name.localeCompare(b.name, undefined, {sensitivity: 'base'}));
 
 const totalAlbums = userAlbums.length;
+const searchTerm = albumSearchInput.value.trim().toLowerCase();
+const visibleAlbums = searchTerm
+? userAlbums.filter(album => String(album.name || '').toLowerCase().includes(searchTerm))
+: userAlbums;
 const albumWord = totalAlbums === 1 ? 'album' : 'albums';
-$('#dashboardMeta').textContent = totalAlbums > 0 ? `${totalAlbums} ${albumWord}` : 'No albums';
+if (totalAlbums === 0) {
+dashboardMeta.textContent = 'No albums';
+} else if (searchTerm) {
+const visibleWord = visibleAlbums.length === 1 ? 'album' : 'albums';
+dashboardMeta.textContent = `Showing ${visibleAlbums.length} ${visibleWord} of ${totalAlbums} ${albumWord}`;
+} else {
+dashboardMeta.textContent = `${totalAlbums} ${albumWord}`;
+}
 
 albumList.innerHTML = '';
-noAlbums.classList.toggle('hidden', userAlbums.length > 0);
+if (totalAlbums === 0) {
+noAlbums.textContent = 'No albums yet. Create your first album ✨';
+noAlbums.classList.remove('hidden');
+return;
+}
+if (visibleAlbums.length === 0) {
+noAlbums.textContent = `No albums match "${albumSearchInput.value.trim()}".`;
+noAlbums.classList.remove('hidden');
+return;
+}
+noAlbums.classList.add('hidden');
 
-if (userAlbums.length === 0) return;
-
-for (const album of userAlbums) {
+for (const album of visibleAlbums) {
 const listItem = document.createElement('div');
 listItem.className = 'album-list-item';
 listItem.dataset.albumId = album.id;
@@ -1223,6 +1251,9 @@ if(items.length) exportByIds(items.map(i=>i.id));
 newAlbumBtn.addEventListener('click', () => {
 albumNameInput.value = '';
 albumDialog.showModal();
+});
+albumSearchInput.addEventListener('input', () => {
+refreshDashboard();
 });
 createAlbumBtn.addEventListener('click', () => {
 createAlbum(albumNameInput.value);
