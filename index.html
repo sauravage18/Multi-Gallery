@@ -190,8 +190,8 @@ flex: 1;
 <input id="importInput" type="file" accept="application/json" />
 📥 Import
 </label>
-<button id="exportSel" disabled>💾 Export Sel</button>
-<button id="exportAll" disabled>💾 Export All</button>
+<button id="exportSel" disabled title="Download selected images one by one">💾 Export Sel</button>
+<button id="exportAll" disabled title="Export all images in this album as a ZIP">💾 Export All</button>
 <button id="selectAll" disabled>☑️ Select All</button>
 <button id="clearSel" disabled>🗑️ Del Sel</button>
 <button id="clearAll" disabled>🧹 Clear All</button>
@@ -828,6 +828,184 @@ a.href = URL.createObjectURL(blob);
 a.download = filename;
 a.click();
 }
+function uniqueZipName(name, type, usedNames){
+let safeName = (name || 'image').replace(/[<>:"/\\|?*]/g, '_').trim() || 'image';
+const hasExt = /\.[a-z0-9]{1,8}$/i.test(safeName);
+if(!hasExt && type && type.startsWith('image/')){
+const sub = type.split('/')[1].split(';')[0].toLowerCase();
+const ext = sub === 'jpeg' ? 'jpg' : (sub === 'svg+xml' ? 'svg' : sub);
+if(ext) safeName += '.' + ext.replace(/[^a-z0-9]/g, '');
+}
+if(usedNames.has(safeName)){
+const dot = safeName.lastIndexOf('.');
+const base = dot > 0 ? safeName.slice(0, dot) : safeName;
+const ext = dot > 0 ? safeName.slice(dot) : '';
+let n = 2;
+while(usedNames.has(`${base}_${n}${ext}`)) n++;
+safeName = `${base}_${n}${ext}`;
+}
+usedNames.add(safeName);
+return safeName;
+}
+function triggerDownload(blob, filename){
+const url = URL.createObjectURL(blob);
+const a = document.createElement('a');
+a.href = url;
+a.download = filename;
+document.body.appendChild(a);
+a.click();
+a.remove();
+setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+async function exportImagesOneByOne(ids){
+const records = (await getManyRecords(ids)).filter(Boolean);
+if(!records.length){
+alert('No images to export.');
+return;
+}
+cancelToken = { cancelled: false };
+cancelProgressBtn.style.display = 'block';
+cancelProgressBtn.disabled = false;
+cancelProgressBtn.textContent = '×';
+closeProgressBtn.style.display = 'none';
+progressTitle.textContent = 'Downloading Images';
+progressHeader.textContent = 'Starting downloads…';
+progressInfo.textContent = `0 / ${records.length}`;
+progressBar.style.width = '0%';
+progressDialog.showModal();
+exportSelBtn.disabled = true;
+const usedNames = new Set();
+let processed = 0;
+let skipped = 0;
+try{
+for(const img of records){
+if(cancelToken.cancelled) throw new Error('Cancelled by user');
+try{
+progressHeader.textContent = `Downloading ${processed + 1} of ${records.length}`;
+progressInfo.textContent = img.name || 'image';
+const plainAB = await decryptToArrayBuffer(img.iv, img.cipher);
+const blob = arrayBufferToBlob(plainAB, img.type);
+const safeName = uniqueZipName(img.name, img.type || blob.type, usedNames);
+triggerDownload(blob, safeName);
+processed++;
+progressBar.style.width = `${(processed / records.length) * 100}%`;
+progressInfo.textContent = `✅ ${safeName} (${processed}/${records.length})`;
+if(processed + skipped < records.length) await new Promise(r => setTimeout(r, 450));
+}catch(err){
+console.warn(`Failed to download ${img.name}`, err);
+skipped++;
+progressInfo.textContent = `⚠️ Skipped: ${img.name}`;
+await new Promise(r => setTimeout(r, 300));
+}
+}
+if(cancelToken.cancelled) throw new Error('Cancelled by user');
+if(processed === 0) throw new Error('No images could be decrypted');
+progressHeader.textContent = '✅ Downloads Started';
+progressInfo.textContent = skipped
+? `Started ${processed} download(s). Skipped ${skipped}.`
+: `Started ${processed} download(s), one by one.`;
+cancelProgressBtn.style.display = 'none';
+closeProgressBtn.style.display = 'block';
+}catch(err){
+if(err.message === 'Cancelled by user'){
+progressHeader.textContent = '❌ Cancelled';
+progressInfo.textContent = processed
+? `Stopped after ${processed} download(s).`
+: 'Export was cancelled.';
+}else{
+console.error('Download export failed', err);
+progressHeader.textContent = '❌ Export Failed';
+progressInfo.textContent = `Error: ${err.message || 'Unknown'}`;
+}
+cancelProgressBtn.style.display = 'none';
+closeProgressBtn.style.display = 'block';
+}finally{
+exportSelBtn.disabled = selections.size === 0;
+}
+}
+async function exportImagesToZip(ids, label){
+const records = (await getManyRecords(ids)).filter(Boolean);
+if(!records.length){
+alert('No images to export.');
+return;
+}
+cancelToken = { cancelled: false };
+cancelProgressBtn.style.display = 'block';
+cancelProgressBtn.disabled = false;
+cancelProgressBtn.textContent = '×';
+closeProgressBtn.style.display = 'none';
+progressTitle.textContent = 'Exporting Images';
+progressHeader.textContent = 'Preparing ZIP…';
+progressInfo.textContent = 'Decrypting images…';
+progressBar.style.width = '0%';
+progressDialog.showModal();
+zip.configure({ useWebWorkers: false });
+const totalFiles = records.length;
+let zipWriter = null;
+try{
+zipWriter = new zip.ZipWriter(new zip.BlobWriter('application/zip'), { bufferedWrite: true });
+const usedNames = new Set();
+let processed = 0;
+let skipped = 0;
+for(const img of records){
+if(cancelToken.cancelled) throw new Error('Cancelled by user');
+try{
+const plainAB = await decryptToArrayBuffer(img.iv, img.cipher);
+const blob = arrayBufferToBlob(plainAB, img.type);
+const safeName = uniqueZipName(img.name, img.type || blob.type, usedNames);
+await zipWriter.add(safeName, new zip.BlobReader(blob), {
+onprogress: (index, max) => {
+const fileProgress = max ? index / max : 1;
+const globalProgress = (processed + fileProgress) / totalFiles;
+progressBar.style.width = `${globalProgress * 100}%`;
+progressInfo.textContent = `${Math.round(globalProgress * 100)}% — ${safeName}`;
+}
+});
+processed++;
+progressBar.style.width = `${(processed / totalFiles) * 100}%`;
+progressHeader.textContent = `Exporting images`;
+progressInfo.textContent = `✅ ${safeName} (${processed}/${totalFiles})`;
+}catch(err){
+console.warn(`Failed to export ${img.name}`, err);
+skipped++;
+progressInfo.textContent = `⚠️ Skipped: ${img.name}`;
+await new Promise(r => setTimeout(r, 300));
+}
+}
+if(cancelToken.cancelled) throw new Error('Cancelled by user');
+if(processed === 0) throw new Error('No images could be decrypted');
+progressHeader.textContent = 'Finalizing ZIP…';
+progressInfo.textContent = 'Writing archive…';
+const zipBlob = await zipWriter.close();
+zipWriter = null;
+const a = document.createElement('a');
+const timestamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+const safeLabel = (label || 'export').replace(/[<>:"/\\|?*]/g, '_').trim() || 'export';
+a.href = URL.createObjectURL(zipBlob);
+a.download = `gallery1-${safeLabel}-${timestamp}.zip`;
+a.click();
+progressHeader.textContent = '✅ Export Complete!';
+progressInfo.textContent = skipped
+? `Saved ${processed} image(s). Skipped ${skipped}.`
+: `Saved ${processed} image(s) as a ZIP.`;
+cancelProgressBtn.style.display = 'none';
+closeProgressBtn.style.display = 'block';
+}catch(err){
+if(zipWriter){
+try{ await zipWriter.close(); }catch(_){}
+}
+if(err.message === 'Cancelled by user'){
+progressHeader.textContent = '❌ Cancelled';
+progressInfo.textContent = 'Export was cancelled.';
+}else{
+console.error('ZIP export failed', err);
+progressHeader.textContent = '❌ Export Failed';
+progressInfo.textContent = `Error: ${err.message || 'Unknown'}`;
+}
+cancelProgressBtn.style.display = 'none';
+closeProgressBtn.style.display = 'block';
+}
+}
 async function exportAlbumById(albumId) {
 const album = albums.find(a => a.id === albumId);
 if (!album) return;
@@ -1242,11 +1420,14 @@ selections.clear();
 refreshGalleryView();
 });
 exportSelBtn.addEventListener('click', async()=>{
-if(selections.size) exportByIds(Array.from(selections));
+if(selections.size) exportImagesOneByOne(Array.from(selections));
 });
 exportAllBtn.addEventListener('click', async()=>{
 const items = await getImageRecordsByAlbum(currentAlbumId);
-if(items.length) exportByIds(items.map(i=>i.id));
+if(items.length){
+const album = albums.find(a => a.id === currentAlbumId);
+exportImagesToZip(items.map(i=>i.id), album?.name || 'album');
+}
 });
 newAlbumBtn.addEventListener('click', () => {
 albumNameInput.value = '';
