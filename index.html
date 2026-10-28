@@ -1447,11 +1447,35 @@ fr.readAsDataURL(blob);
 });
 }
 const ADD_LOG_KEY = 'gallery-add-log';
+function collapseAddLog(list){
+const byName = new Map();
+const order = [];
+for(const entry of list){
+if(!entry || !entry.name) continue;
+const entryName = String(entry.name).trim();
+const count = Number(entry.count) || 0;
+if(!entryName || count <= 0) continue;
+const key = entryName.toLowerCase();
+const existing = byName.get(key);
+if(existing){
+existing.count += count;
+existing.name = entryName;
+const idx = order.indexOf(existing);
+if(idx !== -1) order.splice(idx, 1);
+order.push(existing);
+}else{
+const merged = { name: entryName, count };
+byName.set(key, merged);
+order.push(merged);
+}
+}
+return order;
+}
 function readAddLog(){
 try{
 const parsed = JSON.parse(localStorage.getItem(ADD_LOG_KEY) || '[]');
 if(!Array.isArray(parsed)) return [];
-return parsed.filter(entry => entry && entry.name && Number(entry.count) > 0);
+return collapseAddLog(parsed);
 }catch(_){
 return [];
 }
@@ -1462,7 +1486,17 @@ if(n <= 0) return;
 const entryName = String(name || 'Album').trim() || 'Album';
 try{
 const list = readAddLog();
+const key = entryName.toLowerCase();
+const existing = list.find(entry => entry.name.toLowerCase() === key);
+if(existing){
+existing.count += n;
+existing.name = entryName;
+const idx = list.indexOf(existing);
+if(idx !== -1) list.splice(idx, 1);
+list.push(existing);
+}else{
 list.push({ name: entryName, count: n });
+}
 localStorage.setItem(ADD_LOG_KEY, JSON.stringify(list));
 }catch(err){
 console.warn('Could not save add log', err);
@@ -1478,6 +1512,13 @@ return fallback || 'Album';
 }
 function renderAddLog(){
 const list = readAddLog();
+try{
+const raw = localStorage.getItem(ADD_LOG_KEY);
+if(raw != null){
+const compact = JSON.stringify(list);
+if(raw !== compact) localStorage.setItem(ADD_LOG_KEY, compact);
+}
+}catch(_){}
 if(!list.length){
 logsList.textContent = 'Nothing added yet.';
 return;
